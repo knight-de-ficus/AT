@@ -1,0 +1,56 @@
+import { createServer, type Server } from 'node:http';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { probe } from './adapter.js';
+import type { TestConfig } from './types.js';
+
+let server: Server;
+let baseUrl = '';
+
+beforeAll(async () => {
+  server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      const parsed = JSON.parse(body);
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (req.url === '/v1/chat/completions') {
+        const isTool = Boolean(parsed.tools);
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: isTool ? { tool_calls: [{ index: 0, function: { name: 'report_probe' } }] } : { content: '你好' } }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 8, completion_tokens: 2 } })}\n\n`);
+        res.end('data: [DONE]\n\n');
+      } else if (req.url === '/v1/responses') {
+        res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({ delta: '你好' })}\n\n`);
+        res.end(`event: response.completed\ndata: ${JSON.stringify({ response: { usage: { input_tokens: 8, output_tokens: 2 } } })}\n\n`);
+      } else {
+        res.write(`event: content_block_delta\ndata: ${JSON.stringify({ delta: { type: 'text_delta', text: '你好' } })}\n\n`);
+        res.end(`event: message_delta\ndata: ${JSON.stringify({ usage: { output_tokens: 2 } })}\n\n`);
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('mock server failed');
+  baseUrl = `http://127.0.0.1:${address.port}`;
+});
+
+afterAll(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+
+const config = (protocol: TestConfig['protocol']): TestConfig => ({
+  protocol, baseUrl, apiKey: 'test-key', model: 'test-model', timeoutMs: 2000,
+  contextSizes: [1000], tests: ['hello']
+});
+
+describe('protocol adapters', () => {
+  it.each(['openai-chat', 'openai-responses', 'anthropic'] as const)('parses %s streaming text and usage', async (protocol) => {
+    const result = await probe(config(protocol), { mode: 'text', prompt: '你好' });
+    expect(result.output).toBe('你好');
+    expect(result.outputTokens).toBe(2);
+    expect(result.ttftMs).toBeTypeOf('number');
+  });
+
+  it('detects OpenAI Chat tool calls', async () => {
+    const result = await probe(config('openai-chat'), { mode: 'tool', prompt: 'call tool' });
+    expect(result.toolCalled).toBe(true);
+  });
+});
+
