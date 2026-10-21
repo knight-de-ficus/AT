@@ -4,7 +4,7 @@ import type { AppState } from '../src/types.js';
 
 const statePath = resolve(process.env.AT_DATA_DIR ?? resolve(process.cwd(), 'data'), 'state.json');
 const initial: AppState = {
-  providers: [{ id: 'default-openai', name: 'OpenAI', protocol: 'openai-chat', baseUrl: 'https://api.openai.com', apiKey: '', models: [], timeoutMs: 120000 }],
+  providers: [{ id: 'default-openai', name: 'OpenAI', protocol: 'openai-chat', baseUrl: 'https://api.openai.com', apiKey: '', models: [], timeoutMs: 120000, autoRoute: true }],
   tasks: [{ id: 'complete', name: '完整能力测试', tests: ['hello', 'context', 'tool', 'image', 'audio'], contextSizes: [1000, 4000, 16000], target: { type: 'provider', providerId: 'default-openai', model: '' } }],
   runs: []
 };
@@ -13,6 +13,10 @@ export async function readState(): Promise<AppState> {
   try {
     const raw = JSON.parse(await readFile(statePath, 'utf8')) as AppState & { models?: unknown[]; history?: unknown[] };
     if (!raw.providers) return structuredClone(initial);
+    raw.providers = raw.providers.map(provider => ({ ...provider, autoRoute: provider.autoRoute !== false }));
+    raw.tasks = raw.tasks.map(task => task.target.type === 'custom'
+      ? { ...task, target: { ...task.target, autoRoute: task.target.autoRoute !== false } }
+      : task);
     return raw;
   }
   catch (error) {

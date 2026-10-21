@@ -41,6 +41,7 @@ export interface ModelProvider {
   hasApiKey?: boolean;
   models: string[];
   timeoutMs: number;
+  autoRoute: boolean;
 }
 
 export interface TaskProfile {
@@ -50,7 +51,7 @@ export interface TaskProfile {
   contextSizes: number[];
   target:
     | { type: 'provider'; providerId: string; model: string }
-    | { type: 'custom'; protocol: Protocol; baseUrl: string; apiKey?: string; hasApiKey?: boolean; model: string; timeoutMs: number };
+    | { type: 'custom'; protocol: Protocol; baseUrl: string; apiKey?: string; hasApiKey?: boolean; model: string; timeoutMs: number; autoRoute: boolean };
 }
 
 export interface TestRun {

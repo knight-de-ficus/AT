@@ -12,6 +12,11 @@ beforeAll(async () => {
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
       const parsed = JSON.parse(body);
+      if (parsed.model === 'missing-model') {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'not found' } }));
+        return;
+      }
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       if (req.url === '/v1/chat/completions') {
         const isTool = Boolean(parsed.tools);
@@ -37,7 +42,7 @@ afterAll(() => new Promise<void>((resolve, reject) => server.close((error) => er
 
 const config = (protocol: TestConfig['protocol']): TestConfig => ({
   protocol, baseUrl, apiKey: 'test-key', model: 'test-model', timeoutMs: 2000,
-  contextSizes: [1000], tests: ['hello']
+  contextSizes: [1000], tests: ['hello'], autoRoute: true
 });
 
 describe('protocol adapters', () => {
@@ -51,6 +56,11 @@ describe('protocol adapters', () => {
   it('detects OpenAI Chat tool calls', async () => {
     const result = await probe(config('openai-chat'), { mode: 'tool', prompt: 'call tool' });
     expect(result.toolCalled).toBe(true);
+  });
+
+  it('reports an actionable error when the upstream endpoint returns 404', async () => {
+    await expect(probe({ ...config('openai-chat'), model: 'missing-model' }, { mode: 'text', prompt: '你好' }))
+      .rejects.toThrow(/上游接口不存在 \(404\).*\/v1\/chat\/completions/);
   });
 });
 

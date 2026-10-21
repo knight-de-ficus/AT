@@ -1,6 +1,7 @@
 import { createWavBase64, PNG_BASE64 } from './media.js';
 import { consumeSse } from './sse.js';
 import type { RequestSpec, StreamMeasurement, TestConfig } from './types.js';
+import { resolveEndpoint } from './routing.js';
 
 const tool = {
   name: 'report_probe',
@@ -12,12 +13,6 @@ const tool = {
     additionalProperties: false
   }
 };
-
-function endpoint(base: string, path: string): string {
-  const clean = base.replace(/\/$/, '');
-  if (clean.endsWith(path)) return clean;
-  return `${clean}${path}`;
-}
 
 function chatContent(spec: RequestSpec): unknown {
   if (spec.mode === 'image') return [
@@ -49,7 +44,7 @@ function buildRequest(config: TestConfig, spec: RequestSpec): { url: string; hea
   if (config.protocol === 'anthropic') {
     if (spec.mode === 'audio') throw new UnsupportedError('Anthropic Messages 协议没有原生音频输入内容块');
     return {
-      url: endpoint(config.baseUrl, '/v1/messages'),
+      url: resolveEndpoint(config.baseUrl, config.protocol, 'inference', config.autoRoute),
       headers: { ...commonHeaders, 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01' },
       body: {
         model: config.model,
@@ -62,7 +57,7 @@ function buildRequest(config: TestConfig, spec: RequestSpec): { url: string; hea
   }
   if (config.protocol === 'openai-responses') {
     return {
-      url: endpoint(config.baseUrl, '/v1/responses'),
+      url: resolveEndpoint(config.baseUrl, config.protocol, 'inference', config.autoRoute),
       headers: { ...commonHeaders, authorization: `Bearer ${config.apiKey}` },
       body: {
         model: config.model,
@@ -74,7 +69,7 @@ function buildRequest(config: TestConfig, spec: RequestSpec): { url: string; hea
     };
   }
   return {
-    url: endpoint(config.baseUrl, '/v1/chat/completions'),
+    url: resolveEndpoint(config.baseUrl, config.protocol, 'inference', config.autoRoute),
     headers: { ...commonHeaders, authorization: `Bearer ${config.apiKey}` },
     body: {
       model: config.model,
@@ -106,7 +101,8 @@ export async function probe(config: TestConfig, spec: RequestSpec): Promise<Stre
     });
     if (!response.ok) {
       const body = (await response.text()).slice(0, 1000);
-      throw new Error(`HTTP ${response.status}: ${body || response.statusText}`);
+      if (response.status === 404) throw new Error(`上游接口不存在 (404)：${request.url}。请检查 Base URL、协议或自动路由设置。${body ? ` ${body}` : ''}`);
+      throw new Error(`上游请求失败 (HTTP ${response.status})：${request.url}。${body || response.statusText}`);
     }
     await consumeSse(response, (event, raw) => {
       const data = raw as Record<string, any>;

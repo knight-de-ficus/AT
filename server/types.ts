@@ -8,6 +8,7 @@ export interface TestConfig {
   timeoutMs: number;
   contextSizes: number[];
   tests: TestKind[];
+  autoRoute: boolean;
 }
 
 export interface RequestSpec {

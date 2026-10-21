@@ -6,6 +6,7 @@ import { runTests } from './runner.js';
 import type { TestConfig } from './types.js';
 import { publicState, readState, writeState } from './store.js';
 import type { ModelProvider, RunEvent, TaskProfile, TestResult } from '../src/types.js';
+import { resolveEndpoint } from './routing.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 4174);
@@ -13,7 +14,7 @@ app.disable('x-powered-by');
 app.use(compression());
 app.use(express.json({ limit: '2mb' }));
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, version: '0.3.0' }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, version: '0.4.0' }));
 
 app.get('/api/state', async (_req, res) => {
   try { res.json(publicState(await readState())); }
@@ -60,10 +61,6 @@ app.put('/api/runs/:id', async (req, res) => {
   await writeState(state); res.json(publicState(state));
 });
 
-function modelsUrl(baseUrl: string): string {
-  const clean = baseUrl.replace(/\/$/, '').replace(/\/v1\/(chat\/completions|responses|messages|models)$/, '');
-  return `${clean}/v1/models`;
-}
 app.post('/api/providers/:id/models', async (req, res) => {
   const state = await readState(); const provider = state.providers.find(item => item.id === req.params.id);
   if (!provider) { res.status(404).json({ error: '供应商不存在' }); return; }
@@ -72,8 +69,13 @@ app.post('/api/providers/:id/models', async (req, res) => {
     const headers: Record<string, string> = provider.protocol === 'anthropic'
       ? { 'x-api-key': provider.apiKey, 'anthropic-version': '2023-06-01' }
       : { authorization: `Bearer ${provider.apiKey}` };
-    const response = await fetch(modelsUrl(provider.baseUrl), { headers });
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    const url = resolveEndpoint(provider.baseUrl, provider.protocol, 'models', provider.autoRoute);
+    const response = await fetch(url, { headers });
+    if (!response.ok) {
+      const body = (await response.text()).slice(0, 500);
+      if (response.status === 404) { res.status(502).json({ error: `上游模型列表接口不存在 (404)：${url}。请检查 Base URL 或关闭自动路由后填写完整 models 地址。${body ? ` ${body}` : ''}` }); return; }
+      throw new Error(`上游请求失败 (HTTP ${response.status})：${url}。${body || response.statusText}`);
+    }
     const data = await response.json() as { data?: Array<{ id?: string }> };
     provider.models = (data.data ?? []).map(item => item.id).filter((id): id is string => Boolean(id)).sort();
     await writeState(state); res.json({ models: provider.models });
@@ -91,7 +93,8 @@ function validate(value: unknown): TestConfig {
   return {
     protocol: input.protocol!, baseUrl: input.baseUrl.replace(/\/$/, ''), apiKey: input.apiKey,
     model: input.model.trim(), timeoutMs: Math.min(Math.max(input.timeoutMs ?? 120_000, 5_000), 600_000),
-    contextSizes: sizes.length ? sizes : [1000, 4000, 16000], tests: input.tests
+    contextSizes: sizes.length ? sizes : [1000, 4000, 16000], tests: input.tests,
+    autoRoute: input.autoRoute !== false
   };
 }
 
@@ -99,7 +102,7 @@ app.post('/api/tests/run', async (req, res) => {
   const state = await readState();
   const task = state.tasks.find(item => item.id === req.body.taskId);
   if (!task) { res.status(404).json({ error: '任务不存在' }); return; }
-  let target: { protocol: ModelProvider['protocol']; baseUrl: string; apiKey?: string; model: string; timeoutMs: number; providerName: string };
+  let target: { protocol: ModelProvider['protocol']; baseUrl: string; apiKey?: string; model: string; timeoutMs: number; autoRoute: boolean; providerName: string };
   if (task.target.type === 'provider') {
     const providerTarget = task.target;
     const provider = state.providers.find(item => item.id === providerTarget.providerId);
@@ -132,6 +135,10 @@ app.post('/api/tests/run', async (req, res) => {
   }
   catch (error) { emit({ type: 'error', message: error instanceof Error ? error.message : String(error) }); }
   res.end();
+});
+
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: `API 接口不存在 (404)：${req.method} ${req.originalUrl}` });
 });
 
 const clientDir = resolve(process.cwd(), 'dist/client');
