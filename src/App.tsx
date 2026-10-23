@@ -9,11 +9,15 @@ import {
   Image,
   Layers3,
   Menu,
+  LockKeyhole,
+  LogOut,
   Play,
   Plus,
   RefreshCw,
   Server,
+  Settings as SettingsIcon,
   SquareFunction,
+  TerminalSquare,
   Trash2,
   Waves,
   X,
@@ -21,6 +25,8 @@ import {
 import type {
   AppState,
   ModelProvider,
+  PlatformLog,
+  PlatformSettings,
   Protocol,
   RunEvent,
   TaskProfile,
@@ -28,7 +34,7 @@ import type {
   TestResult,
 } from "./types";
 
-type Page = "providers" | "tasks" | "runs";
+type Page = "providers" | "tasks" | "runs" | "logs" | "settings";
 const empty: AppState = { providers: [], tasks: [], runs: [] };
 const uid = () => crypto.randomUUID();
 const protocols: Array<{ value: Protocol; label: string }> = [
@@ -47,6 +53,18 @@ const probes: Array<{
     title: "基础响应",
     detail: "首字延迟与生成速度",
     icon: Waves,
+  },
+  {
+    kind: "stream",
+    title: "流式输出",
+    detail: "检查是否返回多个增量事件",
+    icon: Waves,
+  },
+  {
+    kind: "reasoning",
+    title: "思考能力",
+    detail: "检查思考增量或 reasoning tokens",
+    icon: Activity,
   },
   {
     kind: "context",
@@ -74,6 +92,25 @@ const formatTime = (ms?: number) =>
     : ms >= 1000
       ? `${(ms / 1000).toFixed(2)}s`
       : `${ms}ms`;
+
+function endpointFor(provider: ModelProvider, purpose: "models" | "chat"): string {
+  const base = provider.baseUrl.trim().replaceAll("\\", "/").replace(/\/+$/, "");
+  if (!provider.autoRoute) return base || "—";
+  try {
+    const url = new URL(base);
+    const target = purpose === "models" ? "models" : provider.protocol === "openai-chat" ? "chat/completions" : provider.protocol === "openai-responses" ? "responses" : "messages";
+    let path = url.pathname.replace(/\/+$/, "");
+    const matched = path.match(/^(.*\/v1)\/(?:chat\/completions|responses|messages|models)$/);
+    if (matched) path = matched[1];
+    else if (!/\/v1$/.test(path)) {
+      path = path.replace(/\/(?:chat\/completions|responses|messages|models)$/, "");
+      path = `${path}/v1`.replace(/\/+/g, "/");
+    }
+    url.pathname = `${path}/${target}`.replace(/\/+/g, "/");
+    url.search = ""; url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch { return "地址无效"; }
+}
 
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -144,16 +181,21 @@ export function App() {
   const [state, setState] = useState<AppState>(empty);
   const [menu, setMenu] = useState(false);
   const [notice, setNotice] = useState("");
+  const [auth, setAuth] = useState<{ required: boolean; authenticated: boolean } | null>(null);
   async function reload() {
     setState(await api<AppState>("/api/state"));
   }
   useEffect(() => {
-    reload().catch((error) => setNotice(error.message));
+    api<{ required: boolean; authenticated: boolean }>("/api/auth/status")
+      .then(async value => { setAuth(value); if (value.authenticated) await reload(); })
+      .catch((error) => setNotice(error.message));
   }, []);
   const nav = [
     { id: "providers" as const, label: "模型供应商", icon: Server },
     { id: "tasks" as const, label: "测试任务", icon: Layers3 },
     { id: "runs" as const, label: "测试结果", icon: Clock3 },
+    { id: "logs" as const, label: "平台日志", icon: TerminalSquare },
+    { id: "settings" as const, label: "设置", icon: SettingsIcon },
   ];
   function notify(message: string) {
     setNotice(message);
@@ -164,6 +206,8 @@ export function App() {
     setMenu(false);
     window.scrollTo(0, 0);
   }
+  if (!auth) return <div className="loading">正在连接服务端…</div>;
+  if (auth.required && !auth.authenticated) return <Login onSuccess={async () => { setAuth({ required: true, authenticated: true }); await reload(); }} />;
   return (
     <div className="product-shell">
       <aside className={`sidebar ${menu ? "open" : ""}`}>
@@ -196,7 +240,7 @@ export function App() {
           <span>
             <i /> 后端已连接
           </span>
-          <small>AT 0.4.0</small>
+          <small>AT 0.5.0</small>
         </div>
       </aside>
       {menu && <button className="scrim" onClick={() => setMenu(false)} />}
@@ -210,7 +254,6 @@ export function App() {
             <i>/</i>
             <strong>{nav.find((item) => item.id === page)?.label}</strong>
           </div>
-          <div className="secure">模型请求由服务端发出</div>
         </header>
         <main className="page-content">
           {page === "providers" && (
@@ -222,6 +265,11 @@ export function App() {
           {page === "runs" && (
             <Runs state={state} reload={reload} notify={notify} />
           )}
+          {page === "logs" && <Logs notify={notify} />}
+          {page === "settings" && <Settings notify={notify} onAuthChanged={async () => {
+            const value = await api<{ required: boolean; authenticated: boolean }>("/api/auth/status");
+            setAuth(value);
+          }} />}
         </main>
       </section>
       {notice && (
@@ -394,14 +442,24 @@ function Providers({
                     ))}
                   </Select>
                 </Field>
-                <Field label="Base URL">
-                  <input
-                    value={draft.baseUrl}
-                    onChange={(e) =>
-                      setDraft({ ...draft, baseUrl: e.target.value })
-                    }
-                  />
-                </Field>
+                <div className="base-url-row form-wide">
+                  <Field label="Base URL">
+                    <input
+                      value={draft.baseUrl}
+                      onChange={(e) =>
+                        setDraft({ ...draft, baseUrl: e.target.value })
+                      }
+                    />
+                  </Field>
+                  <button
+                    className="route-toggle-compact"
+                    aria-pressed={draft.autoRoute}
+                    onClick={() => setDraft({ ...draft, autoRoute: !draft.autoRoute })}
+                  >
+                    <span><strong>自动路由</strong><small>{draft.autoRoute ? "已开启" : "已关闭"}</small></span>
+                    <span className={`toggle ${draft.autoRoute ? "on" : ""}`}><i /></span>
+                  </button>
+                </div>
                 <Field label="请求超时">
                   <Select
                     value={String(draft.timeoutMs)}
@@ -429,21 +487,10 @@ function Providers({
                   />
                 </Field>
               </div>
-              <button
-                className="route-option"
-                aria-pressed={draft.autoRoute}
-                onClick={() =>
-                  setDraft({ ...draft, autoRoute: !draft.autoRoute })
-                }
-              >
-                <span>
-                  <strong>自动路由</strong>
-                  <small>自动识别根地址、/v1 或完整接口路径</small>
-                </span>
-                <span className={`toggle ${draft.autoRoute ? "on" : ""}`}>
-                  <i />
-                </span>
-              </button>
+              <div className="endpoint-preview">
+                <div><span>MODELS</span><code>{endpointFor(draft, "models")}</code></div>
+                <div><span>CHAT</span><code>{endpointFor(draft, "chat")}</code></div>
+              </div>
               <div className="editor-actions">
                 <button className="secondary" onClick={save}>
                   保存配置
@@ -529,10 +576,11 @@ function Tasks({
   useEffect(() => {
     if (!id && state.tasks[0]) setId(state.tasks[0].id);
   }, [id, state.tasks]);
-  useEffect(
-    () => setDraft(state.tasks.find((item) => item.id === id)),
-    [id, state.tasks],
-  );
+  useEffect(() => {
+    const found = state.tasks.find((item) => item.id === id);
+    if (found) setDraft(found);
+    else if (!id) setDraft(undefined);
+  }, [id, state.tasks]);
   function add() {
     const first = state.providers[0];
     const item: TaskProfile = {
@@ -567,6 +615,8 @@ function Tasks({
     await api(`/api/tasks/${draft.id}`, { method: "DELETE" });
     await reload();
     setId("");
+    setDraft(undefined);
+    setResults([]);
     notify("任务已删除");
   }
   async function run() {
@@ -1078,6 +1128,75 @@ function Runs({
     </>
   );
 }
+
+function Login({ onSuccess }: { onSuccess: () => Promise<void> }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault(); setBusy(true); setError("");
+    try {
+      await api("/api/auth/login", { method: "POST", body: JSON.stringify({ password }) });
+      await onSuccess();
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  }
+  return <div className="login-shell"><form className="login-card" onSubmit={submit}>
+    <div className="login-mark"><LockKeyhole size={20} /></div>
+    <span>AT · ACCESS</span><h1>登录模型测试器</h1><p>平台已开启访问鉴权。</p>
+    {error && <InlineError text={error} />}
+    <Field label="访问密码"><input autoFocus type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="输入平台密码" /></Field>
+    <button className="primary login-button" disabled={busy}>{busy ? "正在验证" : "登录"}</button>
+  </form></div>;
+}
+
+function Logs({ notify }: { notify: (s: string) => void }) {
+  const [logs, setLogs] = useState<PlatformLog[]>([]);
+  const [error, setError] = useState("");
+  async function load() {
+    try {
+      const data = await api<{ logs: PlatformLog[] }>("/api/logs");
+      setLogs(data.logs); setError("");
+    } catch (e) { setError((e as Error).message); }
+  }
+  useEffect(() => { load(); }, []);
+  async function clear() {
+    if (!window.confirm("清空全部平台日志？此操作不可撤销。")) return;
+    await api("/api/logs", { method: "DELETE" }); setLogs([]); notify("平台日志已清空");
+  }
+  return <>
+    <Header overline="PLATFORM LOGS" title="平台日志" description="查看服务端发送给模型的原始请求与收到的流式响应。" action={<div className="header-actions"><button className="secondary" onClick={load}><RefreshCw size={14}/>刷新</button><button className="secondary danger" onClick={clear} disabled={!logs.length}><Trash2 size={14}/>清空</button></div>} />
+    {error && <InlineError text={error} />}
+    <div className="terminal-card log-terminal">{logs.length ? <><div className="terminal-head"><span><i/><i/><i/></span><strong>AT MODEL EXCHANGE LOG</strong><code>{logs.length} entries</code></div><div className="terminal-body">{[...logs].reverse().map((log, index) => <article className="terminal-entry" key={log.id}><div className="terminal-meta"><span>#{index + 1} · {new Date(log.createdAt).toLocaleString("zh-CN")}</span><code>{log.protocol} · {log.model} · {log.durationMs}ms · HTTP {log.status ?? "ERR"}</code><small>{log.url}</small></div><section><span>$ REQUEST</span><pre>{log.request}</pre></section><section><span>$ RESPONSE</span><pre>{log.response || log.error || "(empty)"}</pre></section>{log.error && <section className="terminal-error"><span>$ ERROR</span><pre>{log.error}</pre></section>}{log.truncated && <div className="terminal-warning">该次日志超过 128 KB，已安全截断。</div>}</article>)}</div></> : <Empty title="还没有平台日志" detail="运行一次测试后，全部原始模型输入输出会连续显示在这里。" />}</div>
+  </>;
+}
+
+function Settings({ notify, onAuthChanged }: { notify: (s: string) => void; onAuthChanged: () => Promise<void> }) {
+  const [settings, setSettings] = useState<PlatformSettings | null>(null);
+  const [password, setPassword] = useState("");
+  const [sources, setSources] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => { api<PlatformSettings>("/api/settings").then(value => { setSettings(value); setSources(value.allowedSources.join("\n")); }).catch(e => setError(e.message)); }, []);
+  async function save() {
+    if (!settings) return;
+    setError("");
+    try {
+      const value = await api<PlatformSettings & { reloginRequired?: boolean }>("/api/settings", { method: "PUT", body: JSON.stringify({ ...settings, password, allowedSources: sources.split(/[\n,]+/).map(item => item.trim()).filter(Boolean) }) });
+      setSettings(value); setSources(value.allowedSources.join("\n")); setPassword(""); notify("设置已保存"); await onAuthChanged();
+    } catch (e) { setError((e as Error).message); }
+  }
+  async function logout() { await api("/api/auth/logout", { method: "POST" }); await onAuthChanged(); }
+  if (!settings) return <div className="loading">正在读取设置…</div>;
+  return <>
+    <Header overline="SETTINGS" title="设置" description="管理平台访问鉴权和来源限制。" action={<button className="primary" onClick={save}>保存设置</button>} />
+    {error && <InlineError text={error} />}
+    <div className="settings-stack">
+      <section className="settings-card"><div><span>ACCESS AUTH</span><h2>访问鉴权</h2><p>开启后，访问平台数据和功能前必须先登录。</p></div><button className="settings-switch" aria-pressed={settings.authEnabled} onClick={() => setSettings({ ...settings, authEnabled: !settings.authEnabled })}><span className={`toggle ${settings.authEnabled ? "on" : ""}`}><i/></span>{settings.authEnabled ? "已开启" : "已关闭"}</button><div className="settings-fields"><Field label={settings.hasPassword ? "修改密码" : "设置密码"}><input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder={settings.hasPassword ? "留空则保持当前密码" : "至少 8 个字符"}/></Field>{settings.authEnabled && <button className="secondary logout-button" onClick={logout}><LogOut size={14}/>退出当前登录</button>}</div></section>
+      <section className="settings-card"><div><span>SOURCE POLICY</span><h2>访问源限制</h2><p>支持单个 IPv4、IPv6 地址和 IPv4 CIDR；本机访问始终保留。经反向代理部署时可设置 AT_TRUST_PROXY=1。</p></div><button className="settings-switch" aria-pressed={settings.restrictSources} onClick={() => setSettings({ ...settings, restrictSources: !settings.restrictSources })}><span className={`toggle ${settings.restrictSources ? "on" : ""}`}><i/></span>{settings.restrictSources ? "已限制" : "未限制"}</button><div className="settings-fields full"><Field label="允许的访问源"><textarea value={sources} onChange={e => setSources(e.target.value)} placeholder={"192.168.1.0/24\n10.0.0.8\n2001:db8::1"}/></Field></div></section>
+    </div>
+  </>;
+}
+
 function ResultItem({ result }: { result: TestResult }) {
   return (
     <div className="result-item">

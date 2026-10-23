@@ -7,18 +7,70 @@ import type { TestConfig } from './types.js';
 import { publicState, readState, writeState } from './store.js';
 import type { ModelProvider, RunEvent, TaskProfile, TestResult } from '../src/types.js';
 import { resolveEndpoint } from './routing.js';
+import { accessGuard, authGuard, clearSession, createSession, expiredSessionCookie, hashPassword, isAuthenticated, revokeAllSessions, sessionCookie, verifyPassword } from './security.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 4174);
+if (process.env.AT_TRUST_PROXY === '1') app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(compression());
 app.use(express.json({ limit: '2mb' }));
+app.use(accessGuard);
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, version: '0.4.0' }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, version: '0.5.0' }));
+app.get('/api/auth/status', async (req, res) => {
+  const state = await readState();
+  res.json({ required: state.settings.authEnabled, authenticated: !state.settings.authEnabled || isAuthenticated(req) });
+});
+app.post('/api/auth/login', async (req, res) => {
+  const state = await readState();
+  if (!state.settings.authEnabled) { res.json({ ok: true }); return; }
+  if (!await verifyPassword(String(req.body.password ?? ''), state.settings.passwordHash)) {
+    res.status(401).json({ error: '密码错误' }); return;
+  }
+  res.setHeader('Set-Cookie', sessionCookie(createSession()));
+  res.json({ ok: true });
+});
+app.post('/api/auth/logout', (req, res) => {
+  clearSession(req); res.setHeader('Set-Cookie', expiredSessionCookie); res.json({ ok: true });
+});
+app.use('/api', authGuard);
 
 app.get('/api/state', async (_req, res) => {
   try { res.json(publicState(await readState())); }
   catch { res.status(500).json({ error: '无法读取配置' }); }
+});
+
+app.get('/api/logs', async (_req, res) => {
+  const state = await readState();
+  res.json({ logs: state.logs });
+});
+app.delete('/api/logs', async (_req, res) => {
+  const state = await readState(); state.logs = []; await writeState(state); res.json({ ok: true });
+});
+
+app.get('/api/settings', async (_req, res) => {
+  const { settings } = await readState();
+  res.json({ authEnabled: settings.authEnabled, hasPassword: Boolean(settings.passwordHash), restrictSources: settings.restrictSources, allowedSources: settings.allowedSources });
+});
+app.put('/api/settings', async (req, res) => {
+  const state = await readState();
+  const authEnabled = req.body.authEnabled === true;
+  const password = String(req.body.password ?? '');
+  if (password && password.length < 8) { res.status(400).json({ error: '密码至少需要 8 个字符' }); return; }
+  if (authEnabled && !password && !state.settings.passwordHash) { res.status(400).json({ error: '开启鉴权前需要先设置密码' }); return; }
+  const rules = Array.isArray(req.body.allowedSources)
+    ? req.body.allowedSources.map((item: unknown) => String(item).trim()).filter(Boolean).slice(0, 100)
+    : [];
+  state.settings = {
+    authEnabled,
+    passwordHash: password ? await hashPassword(password) : state.settings.passwordHash,
+    restrictSources: req.body.restrictSources === true,
+    allowedSources: rules
+  };
+  await writeState(state);
+  if (password) revokeAllSessions();
+  res.json({ authEnabled, hasPassword: Boolean(state.settings.passwordHash), restrictSources: state.settings.restrictSources, allowedSources: rules, reloginRequired: Boolean(password && authEnabled) });
 });
 
 function mergeProvider(previous: ModelProvider | undefined, input: ModelProvider): ModelProvider {
@@ -113,6 +165,12 @@ app.post('/api/tests/run', async (req, res) => {
   try { config = validate({ ...target, tests: task.tests, contextSizes: task.contextSizes }); }
   catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : '配置无效' }); return; }
 
+  config.onExchange = async (exchange) => {
+    const current = await readState();
+    current.logs.unshift({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...exchange });
+    current.logs = current.logs.slice(0, 500);
+    await writeState(current);
+  };
   res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('X-Accel-Buffering', 'no');

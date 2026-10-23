@@ -1,5 +1,5 @@
 export type Protocol = 'openai-chat' | 'openai-responses' | 'anthropic';
-export type TestKind = 'hello' | 'context' | 'tool' | 'image' | 'audio';
+export type TestKind = 'hello' | 'stream' | 'reasoning' | 'context' | 'tool' | 'image' | 'audio';
 
 export interface TestConfig {
   protocol: Protocol;
@@ -24,6 +24,8 @@ export interface TestResult {
   contextTokens?: number;
   detail: string;
   output?: string;
+  streamEvents?: number;
+  reasoningTokens?: number;
 }
 
 export type RunEvent =
@@ -71,5 +73,26 @@ export interface AppState {
   providers: ModelProvider[];
   tasks: TaskProfile[];
   runs: TestRun[];
+}
+
+export interface PlatformLog {
+  id: string;
+  createdAt: string;
+  protocol: Protocol;
+  model: string;
+  url: string;
+  status?: number;
+  durationMs: number;
+  request: string;
+  response: string;
+  error?: string;
+  truncated: boolean;
+}
+
+export interface PlatformSettings {
+  authEnabled: boolean;
+  hasPassword: boolean;
+  restrictSources: boolean;
+  allowedSources: string[];
 }
 

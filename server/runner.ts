@@ -6,7 +6,7 @@ import type { TestConfig } from './types.js';
 type Emit = (event: RunEvent) => void;
 
 const labels: Record<TestKind, string> = {
-  hello: '基础响应', context: '长上下文', tool: '工具调用', image: '图片理解', audio: '音频理解'
+  hello: '基础响应', stream: '流式输出', reasoning: '思考能力', context: '长上下文', tool: '工具调用', image: '图片理解', audio: '音频理解'
 };
 
 function makeContext(targetTokens: number): string {
@@ -24,20 +24,28 @@ async function execute(config: TestConfig, kind: TestKind, contextTokens?: numbe
   const id = randomUUID();
   const label = kind === 'context' ? `${contextTokens?.toLocaleString()} tokens` : labels[kind];
   const prompt = kind === 'hello' ? '你好。请用一句简短的中文回复。'
+    : kind === 'stream' ? '请分五行输出数字一到五，每行附带一句不重复的简短中文说明。'
+    : kind === 'reasoning' ? '请计算 137 × 29，并给出最终答案。'
     : kind === 'context' ? makeContext(contextTokens!)
     : kind === 'tool' ? '必须调用 report_probe 工具，并传入 {"result":"ok"}，不要直接回答。'
     : kind === 'image' ? '这张图片是什么颜色？请简短回答。'
     : '请判断这段音频中是否有声音，并简短回答。';
-  const mode = kind === 'tool' ? 'tool' : kind === 'image' ? 'image' : kind === 'audio' ? 'audio' : 'text';
+  const mode = kind === 'tool' ? 'tool' : kind === 'image' ? 'image' : kind === 'audio' ? 'audio' : kind === 'reasoning' ? 'reasoning' : 'text';
   const expectedMarker = kind === 'context' ? `AT-MARKER-${contextTokens}-END` : '';
   const started = performance.now();
   try {
     const measured = await probe(config, { prompt, mode });
     const passed = kind === 'tool' ? measured.toolCalled
+      : kind === 'stream' ? measured.streamEvents > 1 && measured.output.trim().length > 0
+      : kind === 'reasoning' ? measured.reasoningOutput.trim().length > 0 || (measured.reasoningTokens ?? 0) > 0
       : kind === 'context' ? measured.output.includes(expectedMarker)
       : measured.output.trim().length > 0;
     const detail = kind === 'tool'
       ? (passed ? '模型返回了预期的函数调用' : '请求完成，但模型没有返回函数调用')
+      : kind === 'stream'
+        ? (passed ? `收到 ${measured.streamEvents} 个流事件` : `仅收到 ${measured.streamEvents} 个流事件，未确认增量输出`)
+      : kind === 'reasoning'
+        ? (passed ? `检测到思考信号${measured.reasoningTokens ? ` · ${measured.reasoningTokens} reasoning tokens` : ''}` : '请求完成，但未返回思考增量、摘要或 reasoning token 计数')
       : kind === 'context'
         ? (passed ? '成功读取上下文末尾标记' : '未在回答中找到上下文末尾标记')
         : (passed ? '请求与内容解析成功' : '请求完成，但没有可解析的文本输出');

@@ -20,8 +20,11 @@ beforeAll(async () => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       if (req.url === '/v1/chat/completions') {
         const isTool = Boolean(parsed.tools);
-        res.write(`data: ${JSON.stringify({ choices: [{ delta: isTool ? { tool_calls: [{ index: 0, function: { name: 'report_probe' } }] } : { content: '你好' } }] })}\n\n`);
-        res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 8, completion_tokens: 2 } })}\n\n`);
+        const isReasoning = Boolean(parsed.reasoning_effort);
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: isTool ? { tool_calls: [{ index: 0, function: { name: 'report_probe' } }] } : isReasoning ? { reasoning_content: '计算过程' } : { content: '你' } }] })}\n\n`);
+        if (isReasoning) res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: '3973' } }] })}\n\n`);
+        if (!isTool) res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: '好' } }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 8, completion_tokens: 2, ...(isReasoning ? { completion_tokens_details: { reasoning_tokens: 12 } } : {}) } })}\n\n`);
         res.end('data: [DONE]\n\n');
       } else if (req.url === '/v1/responses') {
         res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({ delta: '你好' })}\n\n`);
@@ -56,6 +59,22 @@ describe('protocol adapters', () => {
   it('detects OpenAI Chat tool calls', async () => {
     const result = await probe(config('openai-chat'), { mode: 'tool', prompt: 'call tool' });
     expect(result.toolCalled).toBe(true);
+  });
+
+  it('detects reasoning content and reasoning token usage', async () => {
+    const result = await probe(config('openai-chat'), { mode: 'reasoning', prompt: 'calculate' });
+    expect(result.reasoningOutput).toContain('计算过程');
+    expect(result.reasoningTokens).toBe(12);
+  });
+
+  it('records the raw request and streamed response', async () => {
+    const exchanges: Array<{ request: string; response: string; streamEvents?: number }> = [];
+    const result = await probe({ ...config('openai-chat'), onExchange: exchange => { exchanges.push(exchange); } }, { mode: 'text', prompt: '日志测试' });
+    expect(result.streamEvents).toBeGreaterThan(1);
+    expect(exchanges).toHaveLength(1);
+    expect(exchanges[0].request).toContain('日志测试');
+    expect(exchanges[0].response).toContain('"content":"你"');
+    expect(exchanges[0].response).toContain('"content":"好"');
   });
 
   it('reports an actionable error when the upstream endpoint returns 404', async () => {
